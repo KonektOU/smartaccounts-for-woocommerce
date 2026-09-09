@@ -22,6 +22,38 @@ class Request extends Framework\SV_WC_API_JSON_Request {
 
 
 	/**
+	 * Timezone every API request must be expressed in.
+	 *
+	 * From the SmartAccounts API documentation, under the security measures: "Stale requests —
+	 * requests with a time difference more than 15 minutes are ignored as stale. Important! You
+	 * must send requests with Estonian timezone!"
+	 *
+	 * So this is deliberately not UTC, and deliberately not the store's own timezone either: a
+	 * shop left on WordPress's UTC default would sign every request three hours out in summer
+	 * and have all of them rejected as stale.
+	 */
+	const API_TIMEZONE = 'Europe/Tallinn';
+
+
+	/**
+	 * Format a time the way the API expects it.
+	 *
+	 * @param string $format
+	 * @param int|null $timestamp Unix timestamp, or null for now.
+	 *
+	 * @return string
+	 */
+	public static function format_api_time( $format = 'dmYHis', $timestamp = null ) {
+
+		$date = new \DateTime( '@' . ( null === $timestamp ? time() : (int) $timestamp ) );
+
+		$date->setTimezone( new \DateTimeZone( self::API_TIMEZONE ) );
+
+		return $date->format( $format );
+	}
+
+
+	/**
 	 * Construct API request
 	 *
 	 * @param string $api_id
@@ -52,7 +84,7 @@ class Request extends Framework\SV_WC_API_JSON_Request {
 	public function get_params() {
 		$params = $this->params;
 
-		$params['timestamp'] = date_i18n( 'dmYHis' );
+		$params['timestamp'] = self::format_api_time();
 		$params['apikey']    = $this->api_public_key;
 		$params['signature'] = $this->create_signature( $params, $this->data );
 

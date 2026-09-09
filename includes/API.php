@@ -59,8 +59,8 @@ class API extends Framework\SV_WC_API_Base {
 			);
 
 			if ( null !== $last_sync ) {
-				$params['modifiedFrom'] = date_i18n( 'd.m.Y_H:i:s', $last_sync );
-				$params['modifiedTo']   = date_i18n( 'd.m.Y_H:i:s' );
+				$params['modifiedFrom'] = API\Request::format_api_time( 'd.m.Y_H:i:s', $last_sync );
+				$params['modifiedTo']   = API\Request::format_api_time( 'd.m.Y_H:i:s' );
 			}
 
 			$result = $this->perform_request(
