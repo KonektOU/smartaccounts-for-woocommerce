@@ -105,7 +105,7 @@ class Setup_Wizard extends Framework\Admin\Setup_Wizard {
 		$this->render_form_field(
 			'prices_rounding',
 			array(
-				'label'    => __( 'Rounding', 'konekt-wc-gunfifre' ),
+				'label'    => __( 'Rounding', 'konekt-wc-smartaccounts' ),
 				'type'     => 'select',
 				'required' => true,
 				'options'  => array(
@@ -128,13 +128,13 @@ class Setup_Wizard extends Framework\Admin\Setup_Wizard {
 				'description' => __( 'Choose whether product syncronisation will start right away. You can enabled it later in the settings, for example after adding product IDs to required products.', 'konekt-wc-smartaccounts' ),
 				'class'       => array( 'sv-wc-plugin-admin-setup-control' ),
 			),
-			'no' === $this->get_plugin()->get_integration()->get_option( 'sync_enabled', 'no' )
+			'yes' === $this->get_plugin()->get_integration()->get_option( 'sync_enabled', 'no' )
 		);
 
 		$this->render_form_field(
 			'sync_frequency',
 			array(
-				'label'    => __( 'Sync frequency', 'konekt-wc-gunfifre' ),
+				'label'    => __( 'Sync frequency', 'konekt-wc-smartaccounts' ),
 				'type'     => 'select',
 				'required' => true,
 				'options'  => array(
@@ -144,6 +144,32 @@ class Setup_Wizard extends Framework\Admin\Setup_Wizard {
 			),
 			$this->get_plugin()->get_integration()->get_option( 'sync_frequency', 'once_a_day' )
 		);
+	}
+
+
+	/**
+	 * Save a yes/no toggle from the current step.
+	 *
+	 * An unchecked toggle posts nothing at all, so its absence has to be read as "off" rather
+	 * than as "not answered" — otherwise the option can only ever be switched on. But every
+	 * step shares this one save handler, so absence alone would also switch the toggle off
+	 * whenever a *different* step is submitted. $step_field names a required field from the
+	 * same step, which is always posted, and tells the two cases apart.
+	 *
+	 * @param string $option Option name, also the toggle's field name.
+	 * @param string $step_field Required field on the same step, used to detect that step.
+	 *
+	 * @return void
+	 */
+	protected function save_toggle( $option, $step_field ) {
+
+		if ( ! isset( $_POST[ $step_field ] ) ) { // WPCS: CSRF ok.
+			return;
+		}
+
+		$posted = isset( $_POST[ $option ] ) ? sanitize_text_field( wp_unslash( $_POST[ $option ] ) ) : ''; // WPCS: CSRF ok.
+
+		$this->get_plugin()->get_integration()->update_option( $option, in_array( $posted, array( 'yes', '1', 'on' ), true ) ? 'yes' : 'no' );
 	}
 
 
@@ -167,11 +193,7 @@ class Setup_Wizard extends Framework\Admin\Setup_Wizard {
 			$this->get_plugin()->get_integration()->update_option( 'api_private_key', $api_private_key );
 		}
 
-		if ( ! empty( $_POST['sync_prices'] ) ) {
-			$sync_prices = sanitize_text_field( wp_unslash( $_POST['sync_prices'] ) );
-
-			$this->get_plugin()->get_integration()->update_option( 'sync_prices', $sync_prices );
-		}
+		$this->save_toggle( 'sync_prices', 'prices_rounding' );
 
 		if ( ! empty( $_POST['prices_rounding'] ) ) {
 			$prices_rounding = sanitize_text_field( wp_unslash( $_POST['prices_rounding'] ) );
@@ -179,11 +201,7 @@ class Setup_Wizard extends Framework\Admin\Setup_Wizard {
 			$this->get_plugin()->get_integration()->update_option( 'prices_rounding', $prices_rounding );
 		}
 
-		if ( ! empty( $_POST['sync_enabled'] ) ) {
-			$sync_enabled = sanitize_text_field( wp_unslash( $_POST['sync_enabled'] ) );
-
-			$this->get_plugin()->get_integration()->update_option( 'sync_enabled', $sync_enabled );
-		}
+		$this->save_toggle( 'sync_enabled', 'sync_frequency' );
 
 		if ( ! empty( $_POST['sync_frequency'] ) ) {
 			$sync_frequency = sanitize_text_field( wp_unslash( $_POST['sync_frequency'] ) );

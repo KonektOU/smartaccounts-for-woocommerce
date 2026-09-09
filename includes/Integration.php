@@ -41,6 +41,10 @@ class Integration extends \WC_Integration {
 
 		// Bind to the save action for the settings.
 		add_action( 'woocommerce_update_options_integration_' . $this->id, array( $this, 'process_admin_options' ) );
+
+		// Credentials may have changed, so the cached bank list is no longer trustworthy.
+		add_action( 'woocommerce_update_options_integration_' . $this->id, array( $this, 'flush_payment_methods_cache' ), 20 );
+
 		add_action( 'init', array( $this, 'init' ) );
 		add_action( 'admin_init', array( $this, 'admin_init' ) );
 
@@ -191,7 +195,7 @@ class Integration extends \WC_Integration {
 	 */
 	private function have_api_credentials() {
 
-		return $this->get_option( 'api_public_key' ) && $this->get_option( 'api_public_key' ) && $this->get_option( 'api_url' );
+		return $this->get_option( 'api_public_key' ) && $this->get_option( 'api_private_key' ) && $this->get_option( 'api_url' );
 	}
 
 
@@ -233,7 +237,16 @@ class Integration extends \WC_Integration {
 		add_action( 'woocommerce_product_options_inventory_product_data', array( $this, 'add_product_update_data_field' ) );
 
 		if ( isset( $_GET['update_source'] ) && $this->id === $_GET['update_source'] ) {
-			$product_id = isset( $_GET['post'] ) ? sanitize_text_field( wp_unslash( $_GET['post'] ) ) : null;
+			// This writes stock and calls the API, so it needs the same guards as any admin write.
+			if ( ! current_user_can( 'edit_products' ) ) {
+				return;
+			}
+
+			if ( ! wp_verify_nonce( isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '', $this->id . '_update_source' ) ) {
+				return;
+			}
+
+			$product_id = isset( $_GET['post'] ) ? absint( wp_unslash( $_GET['post'] ) ) : 0;
 			$product    = wc_get_product( $product_id );
 
 			if ( $product && $product->get_sku() ) {
@@ -372,13 +385,14 @@ class Integration extends \WC_Integration {
 
 		if ( $results->max_num_pages > $page ) {
 			return false;
-		} elseif ( $results->max_num_pages === $page ) {
-			$this->get_plugin()->log_action( sprintf( 'End of product updates. Updated total of %d.', $results->total ), 'update-products' );
-
-			return true;
 		}
 
-		return false;
+		/* At the last page — or past it, if the catalogue shrank since the run started, or if
+		   there are no published products at all. Either way the counter has to go back to 1,
+		   otherwise it climbs forever and every later run queries an empty page. */
+		$this->get_plugin()->log_action( sprintf( 'End of product updates. Updated total of %d.', $results->total ), 'update-products' );
+
+		return true;
 	}
 
 
@@ -397,34 +411,6 @@ class Integration extends \WC_Integration {
 
 		// Submit manually
 		$this->maybe_create_invoice( $order->get_id(), $this->get_option( 'invoice_sync_status', 'processing' ), $this->get_option( 'invoice_sync_status', 'processing' ), $order );
-	}
-
-
-	public function add_order_listing_columns( $columns ) {
-		$new_columns = [];
-
-		foreach ( $columns as $column_name => $column_info ) {
-
-			if ( 'order_total' === $column_name ) {
-				$new_columns[ $this->id ] = __( 'SmartAccounts', 'konekt-wc-smartaccounts' );
-			}
-
-			$new_columns [ $column_name ] = $column_info;
-
-		}
-
-		return $new_columns;
-	}
-
-
-	public function show_order_listing_column( $column ) {
-		global $post;
-
-		if ( $this->id == $column ) {
-			$order = wc_get_order( $post->ID );
-
-			echo $this->get_plugin()->get_order_meta( $order, 'invoice_id' );
-		}
 	}
 
 
@@ -447,14 +433,19 @@ class Integration extends \WC_Integration {
 		$customer_id = $this->get_option( 'invoice_private_person_id' );
 
 		if ( $order->get_billing_company() ) {
-			/*if ( $order->get_customer_id() ) {
-				$customer_code = $this->get_api()->get_customer_code( $order->get_customer_id() );
-			}
-
-			if ( ! $customer_code ) {
-				$customer      = $this->get_api()->create_customer( $order );
-				$customer_code = $customer->Code;
-			}*/
+			/* TODO: look the company up in SmartAccounts and create it when it is not there yet.
+			   API::get_customer_code() and API::create_customer() do not exist yet — writing them
+			   needs the SmartAccounts client endpoints. Until then a company order is invoiced
+			   against the private-person client, which is wrong in the books, so say so out loud
+			   rather than letting it pass silently. */
+			$this->get_plugin()->log_action(
+				sprintf(
+					'Order %s is a company order (%s) but B2B customer lookup is not implemented; invoicing it against the private person client ID instead.',
+					$order->get_order_number(),
+					$order->get_billing_company()
+				),
+				'invoices'
+			);
 		}
 
 		$this->get_api()->create_invoice( $order, $customer_id );
@@ -540,7 +531,7 @@ class Integration extends \WC_Integration {
 		<div class="options_group options-group__<?php echo esc_attr( $this->id ); ?>">
 			<p class="form-field">
 				<label><?php echo esc_html( $this->get_method_title() ); ?></label>
-				<a href="<?php echo esc_url( add_query_arg( 'update_source', $this->id ) ); ?>" class="button"><?php esc_html_e( 'Update data', 'konekt-wc-smartaccounts' ); ?></a>
+				<a href="<?php echo esc_url( wp_nonce_url( add_query_arg( 'update_source', $this->id ), $this->id . '_update_source' ) ); ?>" class="button"><?php esc_html_e( 'Update data', 'konekt-wc-smartaccounts' ); ?></a>
 			</p>
 		</div>
 		<?php
@@ -595,7 +586,7 @@ class Integration extends \WC_Integration {
 		$data          = wp_parse_args( $data, $default_args );
 		$row_counter   = 0;
 		$values        = (array) $this->get_option( $key, array() );
-		$payment_types = $this->get_api()->get_payment_methods();
+		$payment_types = $this->get_api_payment_methods();
 
 		ob_start();
 		?>
@@ -685,6 +676,43 @@ class Integration extends \WC_Integration {
 	public function validate_payment_methods_mapping_table_field( $key, $value ) {
 
 		return $this->validate_multiselect_field( $key, $value );
+	}
+
+
+	/**
+	 * Get the SmartAccounts payment methods (banks) from the API, cached.
+	 *
+	 * The settings screen renders this list on every load, so an uncached lookup means the
+	 * page blocks on an HTTP round-trip each time — and hangs outright while the API is down,
+	 * leaving no way to reach the setting that turns the integration off.
+	 *
+	 * @return array
+	 */
+	public function get_api_payment_methods() {
+
+		$payment_methods = $this->get_plugin()->get_cache( 'payment_methods' );
+
+		if ( false === $payment_methods ) {
+			$payment_methods = $this->get_api()->get_payment_methods();
+
+			// A failed lookup returns an empty list; caching that would hide every bank for a day.
+			if ( ! empty( $payment_methods ) ) {
+				$this->get_plugin()->set_cache( 'payment_methods', $payment_methods, DAY_IN_SECONDS );
+			}
+		}
+
+		return (array) $payment_methods;
+	}
+
+
+	/**
+	 * Drop the cached payment method list.
+	 *
+	 * @return void
+	 */
+	public function flush_payment_methods_cache() {
+
+		$this->get_plugin()->delete_cache( 'payment_methods' );
 	}
 
 

@@ -31,7 +31,7 @@ class Plugin extends Framework\SV_WC_Plugin {
 	protected static $instance;
 
 	/** plugin version number */
-	const VERSION = '1.0.0';
+	const VERSION = '1.0.1';
 
 	/** plugin id */
 	const PLUGIN_ID = 'konekt-wc-smartaccounts';
@@ -126,8 +126,12 @@ class Plugin extends Framework\SV_WC_Plugin {
 	public function schedule_action( $action, $data = array(), $recurring = null, $next_run = null ) {
 
 		if ( ! as_next_scheduled_action( $this->get_id() . '_' . $action, $data, $this->get_id() ) ) {
-			if ( null !== $recurring || null !== $recurring ) {
+			if ( null !== $recurring ) {
 				as_schedule_recurring_action( $next_run ?? time(), $recurring, $this->get_id() . '_' . $action, $data, $this->get_id() );
+			} elseif ( null !== $next_run ) {
+				// A one-off at a set time: without this it fell through to the async branch below
+				// and ran immediately, silently discarding $next_run.
+				as_schedule_single_action( $next_run, $this->get_id() . '_' . $action, $data, $this->get_id() );
 			} else {
 				as_enqueue_async_action( $this->get_id() . '_' . $action, $data, $this->get_id() );
 			}

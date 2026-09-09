@@ -204,9 +204,11 @@ class API extends Framework\SV_WC_API_Base {
 				$product = $item->get_product();
 
 				$invoice_data['rows'][] = array(
-					'code'        => $product->get_sku(),
-					'description' => $product->get_name(),
-					'price'       => wc_format_decimal( $item->get_total( 'edit' ) / $item->get_quantity() ),
+					// The product may have been deleted since the order was placed, in which
+					// case get_product() is false and only the order item still knows the name.
+					'code'        => $product ? $product->get_sku() : '',
+					'description' => $product ? $product->get_name() : $item->get_name(),
+					'price'       => wc_format_decimal( $this->get_item_unit_price( $item ) ),
 					'quantity'    => $item->get_quantity(),
 					'vatPc'       => $this->get_vat_percentage( $item ),
 				);
@@ -245,12 +247,19 @@ class API extends Framework\SV_WC_API_Base {
 		);
 
 		if ( 200 === $this->get_response_code() ) {
+
+			// The API answers in camelCase; read it once here so the note, the meta and the
+			// return value cannot drift apart into different spellings of the same field.
+			$invoice_id     = $response->invoiceId;
+			$invoice_number = $response->invoiceNumber;
+			$client_id      = $response->clientId;
+
 			// Save order and customer IDs from response.
 			$this->get_plugin()->add_order_meta(
 				$order,
 				array(
-					'invoice_id' => $response->invoiceId,
-					'client_id'  => $response->clientId,
+					'invoice_id' => $invoice_id,
+					'client_id'  => $client_id,
 				)
 			);
 
@@ -258,18 +267,18 @@ class API extends Framework\SV_WC_API_Base {
 			$this->get_plugin()->add_order_note(
 				$order,
 				sprintf(
-					/* translators: %s invoice number, %s invoice ID, %s customer ID */
-					__( 'Created invoice no. %1$s with ID %2$s. Customer ID is %1$s.', 'konekt-wc-smartaccounts' ),
-					$response->invoiceNumber,
-					$response->invoiceId,
-					$response->clientId,
+					/* translators: %1$s invoice number, %2$s invoice ID, %3$s customer ID */
+					__( 'Created invoice no. %1$s with ID %2$s. Customer ID is %3$s.', 'konekt-wc-smartaccounts' ),
+					$invoice_number,
+					$invoice_id,
+					$client_id
 				)
 			);
 
 			return array(
-				'invoice_id'  => $response->InvoiceId,
-				'invoice_no'  => $response->InvoiceNo,
-				'customer_id' => $response->CustomerId,
+				'invoice_id'  => $invoice_id,
+				'invoice_no'  => $invoice_number,
+				'customer_id' => $client_id,
 			);
 		} else {
 
@@ -296,6 +305,29 @@ class API extends Framework\SV_WC_API_Base {
 
 
 	/**
+	 * Get the unit price for an order item.
+	 *
+	 * A line item can legitimately sit at quantity zero — a fully refunded line, or a quantity
+	 * edited down in the admin — and dividing by it throws DivisionByZeroError on PHP 8, which
+	 * would abort the order status transition the invoice is created from.
+	 *
+	 * @param \WC_Order_Item $order_item
+	 *
+	 * @return float
+	 */
+	protected function get_item_unit_price( $order_item ) {
+
+		$quantity = (float) $order_item->get_quantity();
+
+		if ( 0.0 === $quantity ) {
+			return 0.0;
+		}
+
+		return (float) $order_item->get_total( 'edit' ) / $quantity;
+	}
+
+
+	/**
 	 * Get VAT percentage for the order item
 	 *
 	 * @param \WC_Order_Item $order_item
@@ -308,9 +340,11 @@ class API extends Framework\SV_WC_API_Base {
 		$tax_class = $order_item->get_tax_class();
 		$tax_items = $order->get_items( 'tax' );
 
+		// The rates depend only on the tax class, so looking them up per tax item repeats the same query.
+		$tax_rates = \WC_Tax::get_rates_for_tax_class( $tax_class );
+
 		foreach ( $tax_items as $tax_item ) {
 			$tax_rate_id = $tax_item->get_rate_id();
-			$tax_rates   = \WC_Tax::get_rates_for_tax_class( $tax_class );
 
 			foreach ( $tax_rates as $rate_id => $tax_rate ) {
 				if ( $rate_id == $tax_rate_id ) {
