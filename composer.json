@@ -1,0 +1,12 @@
+{
+    "minimum-stability": "dev",
+    "repositories": [
+      {
+        "type": "vcs",
+        "url": "https://github.com/godaddy-wordpress/wc-plugin-framework"
+      }
+    ],
+    "require" : {
+      "skyverge/wc-plugin-framework": "5.15.2"
+    }
+  }
