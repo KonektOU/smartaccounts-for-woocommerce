@@ -31,16 +31,13 @@ class Plugin extends Framework\SV_WC_Plugin {
 	protected static $instance;
 
 	/** plugin version number */
-	const VERSION = '1.0.1';
+	const VERSION = '1.0.2';
 
 	/** plugin id */
 	const PLUGIN_ID = 'konekt-wc-smartaccounts';
 
 	/** @var string the integration class name */
 	const INTEGRATION_CLASS = '\\Konekt\\WooCommerce\\SmartAccounts\\Integration';
-
-	/** @var string the data store class name */
-	const DATASTORE_CLASS = '\\Konekt\\WooCommerce\\SmartAccounts\\Product_Data_Store';
 
 	/** @var \Konekt\WooCommerce\SmartAccounts\Integration the integration class instance */
 	private $integration;
@@ -89,27 +86,10 @@ class Plugin extends Framework\SV_WC_Plugin {
 		// Add integration
 		add_filter( 'woocommerce_integrations', array( $this, 'load_integration' ) );
 
-		// Add custom data store
-		add_filter( 'woocommerce_data_stores', array( $this, 'load_product_data_store' ) );
-	}
-
-
-	public function load_product_data_store( $stores = array() ) {
-
-		if ( ! class_exists( self::DATASTORE_CLASS ) ) {
-			require_once $this->get_plugin_path() . '/includes/Product_Data_Store.php';
-			require_once $this->get_plugin_path() . '/includes/Data_Stores/Product.php';
-			require_once $this->get_plugin_path() . '/includes/Data_Stores/Product_Variable.php';
-			require_once $this->get_plugin_path() . '/includes/Data_Stores/Product_Variation.php';
-		}
-
-		$base_store = self::DATASTORE_CLASS;
-
-		$stores['product']           = new Data_Stores\Product( new $base_store() );
-		$stores['product-variable']  = new Data_Stores\Product_Variable( new $base_store() );
-		$stores['product-variation'] = new Data_Stores\Product_Variation( new $base_store() );
-
-		return $stores;
+		/* No custom product data store. Stock cannot be fetched per product read: SmartAccounts
+		   allows 1000 requests per 24 hours and 50 article codes per request, so a single busy
+		   category page would burn the day's budget. Stock is refreshed by the scheduled sweep
+		   and topped up for the cart's own SKUs — see Integration::refresh_stock_for_skus(). */
 	}
 
 

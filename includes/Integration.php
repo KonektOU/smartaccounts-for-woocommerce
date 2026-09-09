@@ -17,6 +17,23 @@ defined( 'ABSPATH' ) || exit;
 class Integration extends \WC_Integration {
 
 	/**
+	 * How many article codes fit in one articles:getwarehousequantities request.
+	 *
+	 * From the API documentation: "codes - urlencoded string of comma separated values of max 50
+	 * article codes". It doubles as the page size of the scheduled sweep, so one page is one
+	 * request.
+	 */
+	const API_CODES_PER_REQUEST = 50;
+
+	/**
+	 * How long a SKU refreshed on demand is left alone before it may be asked about again.
+	 *
+	 * SmartAccounts allows 1000 requests per 24 hours and 60 per minute. This cooldown is what
+	 * keeps cart and checkout page reloads from turning into one request each.
+	 */
+	const STOCK_REFRESH_COOLDOWN = MINUTE_IN_SECONDS;
+
+	/**
 	 * Plugin instance
 	 *
 	 * @var \Konekt\WooCommerce\SmartAccounts\Plugin
@@ -209,6 +226,11 @@ class Integration extends \WC_Integration {
 		if ( $this->have_api_credentials() ) {
 			$this->schedule_cron();
 
+			if ( $this->is_stock_sync_enabled() ) {
+				// Top up the cart's own SKUs just before WooCommerce validates them against stock.
+				add_action( 'woocommerce_check_cart_items', array( $this, 'refresh_cart_stock' ), 5 );
+			}
+
 			if ( 'yes' === $this->get_option( 'invoice_sync_allowed', 'no' ) ) {
 				add_action( 'woocommerce_order_status_changed', array( $this, 'maybe_create_invoice' ), 20, 4 );
 			}
@@ -285,7 +307,7 @@ class Integration extends \WC_Integration {
 			$this->get_plugin()->schedule_action( 'continuous_job', array(), 5 * MINUTE_IN_SECONDS );
 		}
 
-		if ( 'yes' === $this->get_option( 'sync_enabled', 'no' ) && 'yes' === $this->get_option( 'stock_sync_enabled', 'no' ) ) {
+		if ( $this->is_stock_sync_enabled() ) {
 			$this->get_plugin()->hook_action( 'continuous_job', array( $this, 'continuous_job_hook' ) );
 		}
 	}
@@ -315,16 +337,16 @@ class Integration extends \WC_Integration {
 
 		$this->get_plugin()->log_action( sprintf( 'Fetching products for an update, page %d.', $page ), 'update-products' );
 
-		$api  = $this->get_api();
 		$args = array(
 			'type'     => array( ProductType::SIMPLE, ProductType::VARIABLE, ProductType::VARIATION ),
 			'return'   => 'ids',
-			'limit'    => 50, // SmartAccounts limit.
+			'limit'    => self::API_CODES_PER_REQUEST,
 			'order'    => 'ASC',
 			'orderby'  => 'ID',
 			'status'   => ProductStatus::PUBLISH,
 			'paginate' => true,
 			'page'     => $page,
+			'has_sku'  => true,
 		);
 
 		if ( function_exists( 'pll_default_language' ) ) {
@@ -334,51 +356,18 @@ class Integration extends \WC_Integration {
 		$results = wc_get_products( $args );
 
 		if ( ! empty( $results->products ) ) {
-			$products_skus = array();
-			$products      = array();
+			$products = array();
 
 			foreach ( $results->products as $product_id ) {
 				$product_id = $this->get_wpml_original_post_id( $product_id );
 				$product    = wc_get_product( $product_id );
 
-				if ( $product ) {
+				if ( $product && '' !== $product->get_sku() ) {
 					$products[ $product->get_sku() ] = $product;
-					$products_skus[ $product_id ]    = $product->get_sku();
 				}
 			}
 
-			if ( ! empty( $products_skus ) ) {
-				$stocks = $api->get_article_stock( $products_skus );
-
-				if ( ! empty( $stocks ) ) {
-					foreach ( $stocks as $product_stock ) {
-						if ( 'OK' !== $product_stock->status || empty( $product_stock->code ) ) {
-							continue;
-						}
-
-						if ( ! array_key_exists( $product_stock->code, $products ) ) {
-							$this->get_plugin()->log_action( sprintf( 'Product %s not found.', $product_stock->code ), 'update-products' );
-
-							continue;
-						}
-
-						$product = $products[ $product_stock->code ];
-
-						$new_stock_count = wc_stock_amount( $product_stock->quantity );
-
-						$product->set_manage_stock( true );
-						$product->set_stock_quantity( $new_stock_count );
-
-						if ( $new_stock_count > 0 ) {
-							$product->set_stock_status( 'instock' );
-						}
-
-						if ( ! empty( $product->get_changes() ) ) {
-							$product->save();
-						}
-					}
-				}
-			}
+			$this->sync_stock_for_products( $products );
 		}
 
 		$this->get_plugin()->log_action( sprintf( 'Updated %d products, page %d of %d. Total products %d.', count( $results->products ), $page, $results->max_num_pages, $results->total ), 'update-products' );
@@ -393,6 +382,143 @@ class Integration extends \WC_Integration {
 		$this->get_plugin()->log_action( sprintf( 'End of product updates. Updated total of %d.', $results->total ), 'update-products' );
 
 		return true;
+	}
+
+
+	/**
+	 * Apply SmartAccounts warehouse quantities to a set of products.
+	 *
+	 * @param \WC_Product[] $products Products keyed by SKU. At most API_CODES_PER_REQUEST of them.
+	 *
+	 * @return int Number of products whose stock actually changed.
+	 */
+	protected function sync_stock_for_products( array $products ) {
+
+		if ( empty( $products ) ) {
+			return 0;
+		}
+
+		$stocks = $this->get_api()->get_article_stock( array_keys( $products ) );
+
+		if ( empty( $stocks ) ) {
+			return 0;
+		}
+
+		$updated = 0;
+
+		foreach ( $stocks as $product_stock ) {
+			if ( 'OK' !== $product_stock->status || empty( $product_stock->code ) ) {
+				continue;
+			}
+
+			if ( ! array_key_exists( $product_stock->code, $products ) ) {
+				$this->get_plugin()->log_action( sprintf( 'Product %s not found.', $product_stock->code ), 'update-products' );
+
+				continue;
+			}
+
+			$product         = $products[ $product_stock->code ];
+			$new_stock_count = wc_stock_amount( $product_stock->quantity );
+
+			$product->set_manage_stock( true );
+			$product->set_stock_quantity( $new_stock_count );
+
+			if ( $new_stock_count > 0 ) {
+				$product->set_stock_status( 'instock' );
+			}
+
+			if ( ! empty( $product->get_changes() ) ) {
+				$product->save();
+
+				$updated++;
+			}
+		}
+
+		return $updated;
+	}
+
+
+	/**
+	 * Refresh stock for a specific set of SKUs, on demand.
+	 *
+	 * This is the "near-live" half of stock syncing. The scheduled sweep keeps the whole
+	 * catalogue roughly current, which is accurate enough to render a product page; this tops up
+	 * the handful of SKUs a shopper is actually about to buy, where being wrong means overselling.
+	 *
+	 * It is deliberately not called on product reads. SmartAccounts allows 1000 requests per 24
+	 * hours, so a per-read lookup would be exhausted by a single crawler pass over the catalogue.
+	 * Here the cost is bounded twice over: one request covers up to 50 codes, and a SKU refreshed
+	 * within the cooldown is not asked about again, so reloading the cart page costs nothing.
+	 *
+	 * @param string[] $skus
+	 *
+	 * @return int Number of products whose stock actually changed.
+	 */
+	public function refresh_stock_for_skus( array $skus ) {
+
+		$skus = array_slice( array_unique( array_filter( $skus ) ), 0, self::API_CODES_PER_REQUEST );
+
+		if ( empty( $skus ) ) {
+			return 0;
+		}
+
+		$products = array();
+
+		foreach ( $skus as $sku ) {
+			if ( false !== $this->get_plugin()->get_cache( 'stock_checked_' . md5( $sku ) ) ) {
+				continue;
+			}
+
+			$product_id = wc_get_product_id_by_sku( $sku );
+			$product    = $product_id ? wc_get_product( $product_id ) : null;
+
+			if ( $product ) {
+				$products[ $sku ] = $product;
+			}
+
+			// Marked before the call, so a failing API does not turn every reload into a retry.
+			$this->get_plugin()->set_cache( 'stock_checked_' . md5( $sku ), 1, self::STOCK_REFRESH_COOLDOWN );
+		}
+
+		return $this->sync_stock_for_products( $products );
+	}
+
+
+	/**
+	 * Refresh stock for everything in the cart before it is validated.
+	 *
+	 * Runs on the cart and checkout pages. WooCommerce re-validates the cart against stock right
+	 * after this, so the quantities it checks are the ones SmartAccounts has, not the ones the
+	 * last sweep left behind.
+	 *
+	 * @return void
+	 */
+	public function refresh_cart_stock() {
+
+		if ( ! $this->is_stock_sync_enabled() || is_null( WC()->cart ) ) {
+			return;
+		}
+
+		$skus = array();
+
+		foreach ( WC()->cart->get_cart() as $cart_item ) {
+			if ( ! empty( $cart_item['data'] ) && $cart_item['data'] instanceof \WC_Product ) {
+				$skus[] = $cart_item['data']->get_sku();
+			}
+		}
+
+		$this->refresh_stock_for_skus( $skus );
+	}
+
+
+	/**
+	 * Whether stock syncing is switched on.
+	 *
+	 * @return bool
+	 */
+	public function is_stock_sync_enabled() {
+
+		return 'yes' === $this->get_option( 'sync_enabled', 'no' ) && 'yes' === $this->get_option( 'stock_sync_enabled', 'no' );
 	}
 
 
@@ -728,6 +854,18 @@ class Integration extends \WC_Integration {
 
 
 	public function add_custom_product_query_var( $query, $query_vars ) {
+		if ( ! empty( $query_vars['has_sku'] ) ) {
+
+			/* Only a product with a SKU can be matched against a SmartAccounts article code, so
+			   the sweep must not page through the ones without: on this catalogue that is 495 of
+			   761 products, and every page of them costs an API request that can return nothing. */
+			$query['meta_query'][] = array(
+				'key'     => '_sku',
+				'value'   => '',
+				'compare' => '!=',
+			);
+		}
+
 		if ( isset( $query_vars['smartaccounts_id'] ) ) {
 			if ( is_array( $query_vars['smartaccounts_id'] ) ) {
 
