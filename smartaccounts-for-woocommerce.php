@@ -2,10 +2,12 @@
 /**
  * Plugin Name: SmartAccounts for WooCommerce
  * Plugin URI: https://konekt.ee/woocommerce/smartaccounts
- * Description: TODO: plugin description
+ * Description: Supercharge your WooCommerce with SmartAccounts integration for seamless orders data exchange.
  * Author: Konekt
  * Author URI: https://konekt.ee
  * Version: 1.0.0
+ * Requires at least: 5.6
+ * Requires PHP: 7.4
  * Text Domain: konekt-wc-smartaccounts
  * Domain Path: /i18n/languages/
  *
@@ -19,8 +21,8 @@
  * @copyright Copyright (c) 2025 Konekt
  * @license   http://www.gnu.org/licenses/gpl-3.0.html GNU General Public License v3.0
  *
- * WC requires at least: 3.5
- * WC tested up to: 4.7
+ * WC requires at least: 3.9
+ * WC tested up to: 11.0
  */
 
 defined( 'ABSPATH' ) || exit;
